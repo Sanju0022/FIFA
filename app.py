@@ -57,16 +57,41 @@ PLOTLY_LAYOUT = dict(
 # DATA LOADING — single source file. Every graph, KPI, and ML comparison below
 # is derived from this one CSV; nothing else needs to exist on disk.
 # ----------------------------------------------------------------------------
-DATA_DIR = Path(__file__).parent / "data"
-DATA_FILE = DATA_DIR / "fifa_wc2026_cleaned_enriched.csv"
+APP_DIR = Path(__file__).parent
+DATA_FILENAME = "fifa_wc2026_cleaned_enriched.csv"
 
-if not DATA_FILE.exists():
+def find_data_file():
+    """Check the expected location first, then fall back to a few common
+    mistakes (file placed at repo root, or anywhere else in the repo)."""
+    candidates = [
+        APP_DIR / "data" / DATA_FILENAME,   # expected location
+        APP_DIR / DATA_FILENAME,            # accidentally placed next to app.py instead of in data/
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    # Last resort: search the whole repo tree for a file with this name
+    matches = list(APP_DIR.rglob(DATA_FILENAME))
+    if matches:
+        return matches[0]
+    return None
+
+DATA_FILE = find_data_file()
+
+if DATA_FILE is None:
+    try:
+        repo_tree = "\n".join(f"- `{p.relative_to(APP_DIR)}`" for p in sorted(APP_DIR.rglob("*"))
+                               if p.is_file() and ".git" not in p.parts)
+    except Exception:
+        repo_tree = "(could not list repo contents)"
     st.error(
-        f"**Data file not found.** This app expects a single CSV at "
-        f"`data/fifa_wc2026_cleaned_enriched.csv`, next to `app.py`.\n\n"
-        f"- Looking for: `{DATA_FILE.resolve()}`\n\n"
-        "Make sure the `data/` folder (with just this one CSV inside) was pushed to your repo, "
-        "then reboot the app from Streamlit Cloud's *Manage app* menu."
+        f"**Data file not found.** This app looks for `{DATA_FILENAME}` in `data/`, "
+        f"at the repo root, or anywhere else in the repo — and couldn't find it in any of those places.\n\n"
+        f"**Files actually present in this deployment:**\n{repo_tree}\n\n"
+        "Compare that list to what you expect. Most often this means the CSV either wasn't pushed to GitHub "
+        "at all, or was pushed with a different filename/casing than "
+        f"`{DATA_FILENAME}`. After fixing it on GitHub, reboot the app from Streamlit Cloud's "
+        "*Manage app* menu (a plain git push doesn't always trigger a rebuild)."
     )
     st.stop()
 
