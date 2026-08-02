@@ -1,0 +1,13 @@
+streamlit==1.60.0
+pandas==3.0.2
+numpy==2.4.4
+plotly==6.9.0
+scikit-learn==1.8.0
+matplotlib==3.10.8
+seaborn==0.13.2
+mlxtend==0.25.0
+ftfy==6.3.1
+joblib==1.5.3
+xgboost==3.3.0
+lightgbm==4.7.0
+statsmodels==0.14.6
