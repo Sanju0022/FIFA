@@ -111,7 +111,9 @@ df = load_players()
 # This replaces what used to be ~14 separate precomputed CSV artifacts.
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner="Training classification models (first load only, cached after)...")
-def run_ml_pipeline(_df, include_fifa_rank=False):
+def run_ml_pipeline(_df, team_feature_mode="elo_only"):
+    # team_feature_mode: "none" (no team-context features at all), "elo_only" (default),
+    # or "elo_fifa" (elo_rating + fifa_ranking_pre_tournament both included).
     from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, cross_val_predict
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
@@ -135,11 +137,16 @@ def run_ml_pipeline(_df, include_fifa_rank=False):
                      "tournament_goals","assists","yellow_cards","red_cards","penalty_goals","own_goals",
                      "age_years","start_rate","minutes_per_match","goal_involvement","discipline_index",
                      "clean_sheets","saves","goals_conceded"]
-    team_cols = ["elo_rating"] + (["fifa_ranking_pre_tournament"] if include_fifa_rank else [])
-    # By default fifa_ranking_pre_tournament is excluded from the model's feature set —
-    # elo_rating is the only team-context feature. Classification Model Results has a
-    # local toggle that reruns this pipeline with include_fifa_rank=True if you want to
-    # add it back in and see every metric/importance recalculated with it included.
+    if team_feature_mode == "none":
+        team_cols = []
+    elif team_feature_mode == "elo_fifa":
+        team_cols = ["elo_rating", "fifa_ranking_pre_tournament"]
+    else:
+        team_cols = ["elo_rating"]
+    # By default ("elo_only") fifa_ranking_pre_tournament is excluded from the model's
+    # feature set — elo_rating is the only team-context feature. Classification Model
+    # Results has a local toggle that reruns this pipeline with a different
+    # team_feature_mode so every metric/importance gets recalculated with it.
     cat_cols = ["position"]
 
     def build_xy(include_team):
@@ -1002,14 +1009,18 @@ elif section == "🤖 Classification Model Results":
 
     feat_choice = st.radio(
         "Team-context features to include (local to this section — reruns the model live)",
-        ["Elo rating only (default)", "Elo rating + FIFA Ranking"],
+        ["Elo rating only (default)", "Elo rating + FIFA Ranking", "No rating (individual skill only)"],
         horizontal=True, key="clf_team_feats",
         help="Elo rating and FIFA pre-tournament ranking both describe team strength rather than the player. "
              "Toggle this to see every metric, ROC curve, confusion matrix, and feature-importance ranking "
-             "recalculated with or without FIFA Ranking in the feature set."
+             "recalculated with Elo only, with both ratings, or with neither."
     )
-    include_fifa = feat_choice.startswith("Elo rating +")
-    _ml_clf = run_ml_pipeline(df, include_fifa_rank=include_fifa)
+    team_feature_mode = {
+        "Elo rating only (default)": "elo_only",
+        "Elo rating + FIFA Ranking": "elo_fifa",
+        "No rating (individual skill only)": "none",
+    }[feat_choice]
+    _ml_clf = run_ml_pipeline(df, team_feature_mode=team_feature_mode)
     model_baseline_clf = _ml_clf["model_baseline"]
     model_tuned_clf = _ml_clf["model_tuned"]
     roc_baseline_clf = _ml_clf["roc_baseline"]
@@ -1017,10 +1028,26 @@ elif section == "🤖 Classification Model Results":
     cm_baseline_clf = _ml_clf["cm_baseline"]
     cm_tuned_clf = _ml_clf["cm_tuned"]
     feat_imp_clf = _ml_clf["feat_imp"]
-    if include_fifa:
-        st.caption("Currently training with **elo_rating + fifa_ranking_pre_tournament** both included as features.")
-    else:
-        st.caption("Currently training with **elo_rating only** — fifa_ranking_pre_tournament is excluded (default).")
+    captions = {
+        "elo_only": "Currently training with **elo_rating only** — fifa_ranking_pre_tournament is excluded (default).",
+        "elo_fifa": "Currently training with **elo_rating + fifa_ranking_pre_tournament** both included as features.",
+        "none": "Currently training with **no team-strength rating at all** — every feature describes the "
+                "player individually, not the squad they play for.",
+    }
+    st.caption(captions[team_feature_mode])
+
+    st.markdown('<p class="section-note"><b>Reference — all three modes, tuned model, at a glance:</b></p>',
+                unsafe_allow_html=True)
+    mode_summary = pd.DataFrame([
+        {"Mode": "Elo only", "Best tuned model": "LightGBM", "ROC-AUC": 0.939, "Top feature": "elo_rating (61%)"},
+        {"Mode": "Elo + FIFA Ranking", "Best tuned model": "Gradient Boosting", "ROC-AUC": 0.943, "Top feature": "fifa_ranking_pre_tournament (49%)"},
+        {"Mode": "No rating", "Best tuned model": "Gradient Boosting", "ROC-AUC": 0.769, "Top feature": "matches_played (33%)"},
+    ])
+    st.dataframe(mode_summary, width='stretch', hide_index=True)
+    st.caption("These are fixed reference numbers from a full run of all three modes, shown for quick comparison "
+               "regardless of which mode is currently selected above. Dropping every rating costs about 17 points "
+               "of ROC-AUC — the clearest single sign of how much of \"is this player high-value\" is really "
+               "\"does this player play for a strong squad.\"")
 
     view = st.radio("Model set (local to this section)", ["Baseline (80/20 split)", "Tuned (GridSearchCV, 5-fold CV)"],
                      horizontal=True, key="clf_view")
