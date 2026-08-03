@@ -111,7 +111,7 @@ df = load_players()
 # This replaces what used to be ~14 separate precomputed CSV artifacts.
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner="Training classification models (first load only, cached after)...")
-def run_ml_pipeline(_df):
+def run_ml_pipeline(_df, include_fifa_rank=False):
     from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, cross_val_predict
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
@@ -135,12 +135,11 @@ def run_ml_pipeline(_df):
                      "tournament_goals","assists","yellow_cards","red_cards","penalty_goals","own_goals",
                      "age_years","start_rate","minutes_per_match","goal_involvement","discipline_index",
                      "clean_sheets","saves","goals_conceded"]
-    team_cols = ["elo_rating"]
-    # NOTE: fifa_ranking_pre_tournament intentionally excluded from the model's feature
-    # set — every metric, ROC curve, and feature-importance ranking downstream is
-    # recalculated without it. (It's still used elsewhere in the dashboard — e.g. Team &
-    # Squad Analysis, Club & Group Insights, Correlations — as a standalone business
-    # metric; this removal is scoped to the ML classifier only.)
+    team_cols = ["elo_rating"] + (["fifa_ranking_pre_tournament"] if include_fifa_rank else [])
+    # By default fifa_ranking_pre_tournament is excluded from the model's feature set —
+    # elo_rating is the only team-context feature. Classification Model Results has a
+    # local toggle that reruns this pipeline with include_fifa_rank=True if you want to
+    # add it back in and see every metric/importance recalculated with it included.
     cat_cols = ["position"]
 
     def build_xy(include_team):
@@ -998,18 +997,37 @@ elif section == "🔗 Association Rules":
 elif section == "🤖 Classification Model Results":
     st.title("Classification Model Results")
     st.markdown('<p class="section-note">Target: <b>is_high_value</b> — is a player in the top quartile of market value? '
-                '80/20 stratified train-test split, 6 algorithms, then GridSearchCV (5-fold CV) hyperparameter tuning. '
-                '<b>fifa_ranking_pre_tournament has been removed from the feature set</b> — every metric, ROC curve, '
-                'confusion matrix, and feature-importance ranking below is recalculated without it (elo_rating is now '
-                'the only team-context feature).</p>',
+                '80/20 stratified train-test split, 6 algorithms, then GridSearchCV (5-fold CV) hyperparameter tuning.</p>',
                 unsafe_allow_html=True)
+
+    feat_choice = st.radio(
+        "Team-context features to include (local to this section — reruns the model live)",
+        ["Elo rating only (default)", "Elo rating + FIFA Ranking"],
+        horizontal=True, key="clf_team_feats",
+        help="Elo rating and FIFA pre-tournament ranking both describe team strength rather than the player. "
+             "Toggle this to see every metric, ROC curve, confusion matrix, and feature-importance ranking "
+             "recalculated with or without FIFA Ranking in the feature set."
+    )
+    include_fifa = feat_choice.startswith("Elo rating +")
+    _ml_clf = run_ml_pipeline(df, include_fifa_rank=include_fifa)
+    model_baseline_clf = _ml_clf["model_baseline"]
+    model_tuned_clf = _ml_clf["model_tuned"]
+    roc_baseline_clf = _ml_clf["roc_baseline"]
+    roc_tuned_clf = _ml_clf["roc_tuned"]
+    cm_baseline_clf = _ml_clf["cm_baseline"]
+    cm_tuned_clf = _ml_clf["cm_tuned"]
+    feat_imp_clf = _ml_clf["feat_imp"]
+    if include_fifa:
+        st.caption("Currently training with **elo_rating + fifa_ranking_pre_tournament** both included as features.")
+    else:
+        st.caption("Currently training with **elo_rating only** — fifa_ranking_pre_tournament is excluded (default).")
 
     view = st.radio("Model set (local to this section)", ["Baseline (80/20 split)", "Tuned (GridSearchCV, 5-fold CV)"],
                      horizontal=True, key="clf_view")
     if view.startswith("Baseline"):
-        table, roc_data, cm_data = model_baseline, roc_baseline, cm_baseline
+        table, roc_data, cm_data = model_baseline_clf, roc_baseline_clf, cm_baseline_clf
     else:
-        table, roc_data, cm_data = model_tuned, roc_tuned, cm_tuned
+        table, roc_data, cm_data = model_tuned_clf, roc_tuned_clf, cm_tuned_clf
 
     st.markdown("#### Metrics Table — Accuracy, Precision, Recall, F1, ROC-AUC")
     st.dataframe(table.round(4).sort_values("ROC-AUC", ascending=False), width='stretch', hide_index=True)
@@ -1017,8 +1035,12 @@ elif section == "🤖 Classification Model Results":
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("#### Metric Comparison (Bar Chart)")
-        metrics_long = table.melt(id_vars="Model",
-                                   value_vars=["Train Accuracy", "Test Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC"],
+        # Baseline and Tuned tables have different columns (Tuned has no "Train Accuracy",
+        # since it reports Resubstitution/OOF accuracy instead) — only melt columns that
+        # actually exist in whichever table is currently selected, so this never KeyErrors.
+        candidate_metrics = ["Train Accuracy", "Test Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC"]
+        available_metrics = [c for c in candidate_metrics if c in table.columns]
+        metrics_long = table.melt(id_vars="Model", value_vars=available_metrics,
                                    var_name="Metric", value_name="Score")
         fig = px.bar(metrics_long, x="Model", y="Score", color="Metric", barmode="group",
                      color_discrete_sequence=PALETTE)
@@ -1049,9 +1071,9 @@ elif section == "🤖 Classification Model Results":
     fig.update_layout(**PLOTLY_LAYOUT, height=420)
     st.plotly_chart(fig, width='stretch')
 
-    if len(feat_imp) > 0:
+    if len(feat_imp_clf) > 0:
         st.markdown("#### Feature Importance — Best Overall Model (by Test ROC-AUC)")
-        fig = px.bar(feat_imp.sort_values("importance"), x="importance", y="feature", orientation="h",
+        fig = px.bar(feat_imp_clf.sort_values("importance"), x="importance", y="feature", orientation="h",
                      color="importance", color_continuous_scale=[CHALK, GOLD],
                      labels={"importance": "Importance", "feature": "Feature"})
         fig.update_layout(**PLOTLY_LAYOUT, height=460, coloraxis_showscale=False)
