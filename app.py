@@ -111,7 +111,7 @@ df = load_players()
 # This replaces what used to be ~14 separate precomputed CSV artifacts.
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner="Training classification models (first load only, cached after)...")
-def run_ml_pipeline(_df, include_fifa_rank=True):
+def run_ml_pipeline(_df):
     from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, cross_val_predict
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
@@ -135,7 +135,12 @@ def run_ml_pipeline(_df, include_fifa_rank=True):
                      "tournament_goals","assists","yellow_cards","red_cards","penalty_goals","own_goals",
                      "age_years","start_rate","minutes_per_match","goal_involvement","discipline_index",
                      "clean_sheets","saves","goals_conceded"]
-    team_cols = ["elo_rating"] + (["fifa_ranking_pre_tournament"] if include_fifa_rank else [])
+    team_cols = ["elo_rating"]
+    # NOTE: fifa_ranking_pre_tournament intentionally excluded from the model's feature
+    # set — every metric, ROC curve, and feature-importance ranking downstream is
+    # recalculated without it. (It's still used elsewhere in the dashboard — e.g. Team &
+    # Squad Analysis, Club & Group Insights, Correlations — as a standalone business
+    # metric; this removal is scoped to the ML classifier only.)
     cat_cols = ["position"]
 
     def build_xy(include_team):
@@ -313,17 +318,7 @@ def run_ml_pipeline(_df, include_fifa_rank=True):
                 rules=rules, recall_lift=recall_lift, threshold_comp=threshold_comp, team_vs_indiv=team_vs_indiv,
                 imbalance_comp=imbalance_comp, overfit_diag=overfit_diag)
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("#### Classification feature set")
-include_fifa_rank = st.sidebar.checkbox(
-    "Include `fifa_ranking_pre_tournament`",
-    value=True,
-    help="Uncheck to retrain every classifier (fresh GridSearchCV, same 80/20 split, same 5-fold CV) "
-         "without this column — squad strength is then represented only by `elo_rating`. Affects the "
-         "Classification Model Results and Model Improvements sections."
-)
-
-_ml = run_ml_pipeline(df, include_fifa_rank)
+_ml = run_ml_pipeline(df)
 model_baseline = _ml["model_baseline"]
 model_tuned = _ml["model_tuned"]
 roc_baseline = _ml["roc_baseline"]
@@ -843,6 +838,134 @@ elif section == "🧩 Player Archetypes (Clustering)":
     fig.update_layout(**PLOTLY_LAYOUT, height=420)
     st.plotly_chart(fig, width='stretch')
 
+    # ------------------------------------------------------------------
+    # DEEP DIVE — why clustering, why k=4, and the PCA caveat that matters
+    # ------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("### Deep Dive — Why K-Means, Why k=4, and What the PCA Plot Doesn't Show")
+
+    st.markdown("#### Why clustering at all")
+    st.markdown('<p class="section-note">The goal is to find natural player archetypes — groups of players who look '
+                'similar across a <i>combination</i> of traits (value, experience, output, playing time) rather than '
+                'along any single stat. That is an unsupervised problem — there is no label for "type of player" — '
+                'so K-Means is the natural fit: fast, interpretable, and effective on continuous, standardized '
+                'numeric features.</p>', unsafe_allow_html=True)
+
+    st.markdown("**Features used (all standardized with `StandardScaler` before clustering):**")
+    st.markdown(
+        "- `market_value_eur_capped` — market value winsorized at the 1st/99th percentile, so a few "
+        "Mbappé/Haaland-tier valuations don't dominate Euclidean distance and swamp every other feature "
+        "(the raw column is kept for reporting everywhere else in the dashboard)\n"
+        "- `caps` — career international experience\n"
+        "- `age_years` — age\n"
+        "- `career_goals` — longer-run scoring output (club + country)\n"
+        "- `tournament_goals`, `assists` — this tournament's output\n"
+        "- `minutes_per_match`, `start_rate` — how much they actually play, separating starters from squad depth\n"
+        "- `discipline_index` — yellow + 3×red cards, a behavioral signal\n"
+        "- `elo_rating` — the national squad's Elo, i.e. team context"
+    )
+    st.caption("Clustering runs on these 10 standardized features directly, not on the PCA output. PCA is only "
+               "used afterward to compress those 10 dimensions down to 2 so the clusters can be plotted — it's a "
+               "visualization step, not part of the clustering itself.")
+
+    st.markdown("#### Why 4 clusters specifically")
+    k_sweep = pd.DataFrame([
+        {"k": 2, "Inertia": 10011.7, "Silhouette": 0.2254},
+        {"k": 3, "Inertia": 8653.0, "Silhouette": 0.2418},
+        {"k": 4, "Inertia": 7675.6, "Silhouette": 0.2525},
+        {"k": 5, "Inertia": 7032.7, "Silhouette": 0.2259},
+        {"k": 6, "Inertia": 6457.4, "Silhouette": 0.2279},
+        {"k": 7, "Inertia": 6024.6, "Silhouette": 0.2337},
+        {"k": 8, "Inertia": 5679.3, "Silhouette": 0.1842},
+        {"k": 9, "Inertia": 5300.4, "Silhouette": 0.1974},
+    ])
+    col_k1, col_k2 = st.columns([1, 1.4])
+    with col_k1:
+        st.dataframe(k_sweep.style.apply(
+            lambda row: ["background-color: rgba(212,175,55,0.25); font-weight:600"] * len(row)
+            if row["k"] == 4 else [""] * len(row), axis=1
+        ), width='stretch', hide_index=True)
+    with col_k2:
+        fig = go.Figure(go.Scatter(x=k_sweep["k"], y=k_sweep["Silhouette"], mode="lines+markers",
+                                    line=dict(color=PITCH_GREEN, width=3), marker=dict(size=9)))
+        fig.add_vline(x=4, line_dash="dash", line_color=GOLD)
+        fig.update_layout(**PLOTLY_LAYOUT, height=280, xaxis_title="k (number of clusters)", yaxis_title="Silhouette score")
+        st.plotly_chart(fig, width='stretch')
+    st.markdown('<p class="section-note">The notebook swept k = 2 through 9, computing inertia (elbow) and silhouette '
+                'score at each k, then picked the k with the highest silhouette score. <b>k=4 wins</b>, though only '
+                'narrowly over k=3 — the silhouette scores overall are modest (~0.25), which is honest: a 1,248-player '
+                'dataset with this much within-position and within-team variety doesn\'t split into razor-sharp '
+                'clusters. It\'s a real, if soft, structure. Final model: <code>KMeans(n_clusters=4, random_state=42, '
+                'n_init=10)</code>.</p>', unsafe_allow_html=True)
+
+    st.markdown("#### PCA — the caveat that matters")
+    pc1_var, pc2_var = 0.286, 0.190
+    c1, c2, c3 = st.columns(3)
+    c1.metric("PC1 variance explained", f"{pc1_var*100:.1f}%")
+    c2.metric("PC2 variance explained", f"{pc2_var*100:.1f}%")
+    c3.metric("Total variance captured", f"{(pc1_var+pc2_var)*100:.1f}%")
+    st.markdown('<p class="section-note"><code>PCA(n_components=2)</code> on the same 10 scaled features explains only '
+                '<b>28.6% + 19.0% = 47.6%</b> of total variance. That means the 2D scatter above is a fairly lossy '
+                'projection — over half the variance in how players actually differ isn\'t visible in that plot. '
+                '<b>The clusters themselves are correct</b> (computed in the full 10D space); it\'s just that the 2D '
+                'picture compresses them, so don\'t over-read exact positions or boundaries in the scatter.</p>',
+                unsafe_allow_html=True)
+    st.markdown(
+        "- **PC1** (loadings: `minutes_per_match` 0.43, `start_rate` 0.42, `caps` 0.39, `career_goals` 0.36) "
+        "→ a *\"playing time & experience\"* axis\n"
+        "- **PC2** (loadings: `market_value` 0.55, `elo_rating` 0.44, `age` −0.47, `caps` −0.37) "
+        "→ a *\"young, valuable, top-squad\"* axis"
+    )
+
+    st.markdown("#### The four clusters, in detail")
+    archetype_meta = {
+        0: ("Squad Regulars", "Solid starters at modest value and modest Elo. Position mix skews defensive/central. "
+                               "This is the backbone of most squads — reliable, unspectacular internationally."),
+        1: ("Elite Value Core", "By far the highest market value and squad Elo, i.e. they play for the strongest "
+                                 "national teams. Youngest average age and the best combined output. Attacking-leaning "
+                                 "and concentrated in UEFA and CONMEBOL — the star-player-at-a-top-club, "
+                                 "playing-for-a-top-nation archetype."),
+        2: ("Veteran Leaders", "Extreme outlier on experience — caps and career goals both dramatically higher than "
+                                "any other cluster. Oldest group but still delivering the highest tournament-goal rate. "
+                                "Almost entirely forwards and midfielders — the long-serving, high-mileage attacking "
+                                "veterans every squad carries one or two of."),
+        3: ("Fringe / Non-Playing Squad", "Minutes per match and start rate collapse relative to every other cluster. "
+                                           "Discipline index drops to near-zero, simply because you can't rack up "
+                                           "cards from the bench. Roughly evenly spread across positions — squad "
+                                           "depth that barely features, not any one football \"type.\""),
+    }
+    prof_full_cols = ["market_value_eur", "caps", "age_years", "career_goals", "tournament_goals",
+                       "assists", "minutes_per_match", "start_rate", "elo_rating"]
+    prof_full = df.groupby("cluster")[prof_full_cols].mean()
+    counts_full = df.groupby("cluster").size()
+    pos_full = df.groupby(["cluster", "position"]).size().unstack(fill_value=0)
+
+    cluster_cols = st.columns(len(archetype_meta))
+    for i, (c, (name, summary)) in enumerate(archetype_meta.items()):
+        with cluster_cols[i]:
+            st.markdown(f"**Cluster {c} — {name}**")
+            st.caption(f"{counts_full.get(c, 0)} players")
+            st.markdown(summary)
+            row = prof_full.loc[c] if c in prof_full.index else None
+            if row is not None:
+                st.table(pd.DataFrame({
+                    "": ["Avg. value", "Avg. caps", "Avg. age", "Career goals", "Tourn. goals",
+                         "Min/match", "Start rate", "Squad Elo"],
+                    " ": [f"€{row['market_value_eur']/1e6:.1f}M", f"{row['caps']:.1f}", f"{row['age_years']:.1f}",
+                          f"{row['career_goals']:.1f}", f"{row['tournament_goals']:.2f}",
+                          f"{row['minutes_per_match']:.1f}", f"{row['start_rate']*100:.0f}%",
+                          f"{row['elo_rating']:.0f}"]
+                }).set_index(""))
+            if c in pos_full.index:
+                pos_str = ", ".join(f"{p} {n}" for p, n in pos_full.loc[c].sort_values(ascending=False).items() if n > 0)
+                st.caption(f"Positions: {pos_str}")
+
+    st.info("**The honest summary:** the clustering separates players mainly along two practical dimensions — "
+            "how much they play (Clusters 0/2 vs. 3) and how valuable/central they are to a top squad (Cluster 1 "
+            "vs. the rest) — with Cluster 2 carved out almost entirely by extreme career longevity. It's a "
+            "legitimate, data-driven segmentation, but with a silhouette score around 0.25, treat it as a useful "
+            "lens rather than hard categories — plenty of players sit near cluster boundaries.")
+
 # ============================================================================
 # SECTION 7 — ASSOCIATION RULES
 # ============================================================================
@@ -875,18 +998,11 @@ elif section == "🔗 Association Rules":
 elif section == "🤖 Classification Model Results":
     st.title("Classification Model Results")
     st.markdown('<p class="section-note">Target: <b>is_high_value</b> — is a player in the top quartile of market value? '
-                '80/20 stratified train-test split, 8 algorithms, then GridSearchCV (5-fold CV) hyperparameter tuning.</p>',
+                '80/20 stratified train-test split, 6 algorithms, then GridSearchCV (5-fold CV) hyperparameter tuning. '
+                '<b>fifa_ranking_pre_tournament has been removed from the feature set</b> — every metric, ROC curve, '
+                'confusion matrix, and feature-importance ranking below is recalculated without it (elo_rating is now '
+                'the only team-context feature).</p>',
                 unsafe_allow_html=True)
-
-    if include_fifa_rank:
-        st.info("**Feature set: full**, including both team-context columns — `elo_rating` and "
-                "`fifa_ranking_pre_tournament`. Toggle this off in the sidebar to see how the models "
-                "and feature importance change without the FIFA ranking column.")
-    else:
-        st.warning("**Feature set: `fifa_ranking_pre_tournament` removed.** Every model on this page was "
-                   "re-trained from scratch (fresh GridSearchCV, same 80/20 split, same 5-fold CV) on the "
-                   "remaining features — squad strength is now represented only by `elo_rating`. "
-                   "Toggle it back on in the sidebar to restore the full feature set.")
 
     view = st.radio("Model set (local to this section)", ["Baseline (80/20 split)", "Tuned (GridSearchCV, 5-fold CV)"],
                      horizontal=True, key="clf_view")
@@ -934,17 +1050,7 @@ elif section == "🤖 Classification Model Results":
     st.plotly_chart(fig, width='stretch')
 
     if len(feat_imp) > 0:
-        best_name = model_tuned.sort_values("ROC-AUC", ascending=False).iloc[0]["Model"]
-        st.markdown(f"#### Feature Importance — Best Overall Model (by Test ROC-AUC): {best_name}")
-        st.markdown(
-            '<p class="section-note">This shows, for the single best-performing algorithm, how much each '
-            'input feature contributed to its predictions of <b>is_high_value</b>. For tree-based models '
-            '(Gradient Boosting, Random Forest, XGBoost, LightGBM) it\'s the average reduction in prediction '
-            'error each feature is responsible for across all trees; for linear models it\'s the absolute size '
-            'of the coefficient. Values are normalized to sum to 1, so a feature at 0.20 accounts for roughly '
-            '20% of the model\'s total decision-making weight. It answers "what is the model actually keying '
-            'off of?", not "what causes market value" — importance can reflect a proxy (e.g. squad strength) '
-            'rather than a direct skill signal.</p>', unsafe_allow_html=True)
+        st.markdown("#### Feature Importance — Best Overall Model (by Test ROC-AUC)")
         fig = px.bar(feat_imp.sort_values("importance"), x="importance", y="feature", orientation="h",
                      color="importance", color_continuous_scale=[CHALK, GOLD],
                      labels={"importance": "Importance", "feature": "Feature"})
@@ -1015,8 +1121,9 @@ elif section == "🎯 Model Improvements":
     st.plotly_chart(fig, width='stretch')
 
     st.markdown("#### Team Context vs Individual Skill — Isolating the Effect")
-    team_cols_desc = "`elo_rating` and `fifa_ranking_pre_tournament`" if include_fifa_rank else "`elo_rating` (FIFA ranking currently excluded via the sidebar toggle)"
-    st.markdown(f"Same best algorithm, retrained with vs. without {team_cols_desc}:")
+    st.markdown("Same best algorithm, retrained with vs. without `elo_rating` (the squad's team-strength "
+                "signal). `fifa_ranking_pre_tournament` has been removed from the model's feature set entirely, "
+                "so `elo_rating` is now the only team-context feature being isolated here:")
     col1, col2 = st.columns([1.3, 1])
     with col1:
         fig = px.bar(team_vs_indiv.melt(id_vars="Feature Set",
