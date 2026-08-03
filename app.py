@@ -111,7 +111,7 @@ df = load_players()
 # This replaces what used to be ~14 separate precomputed CSV artifacts.
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner="Training classification models (first load only, cached after)...")
-def run_ml_pipeline(_df):
+def run_ml_pipeline(_df, include_fifa_rank=True):
     from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, cross_val_predict
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
@@ -135,7 +135,7 @@ def run_ml_pipeline(_df):
                      "tournament_goals","assists","yellow_cards","red_cards","penalty_goals","own_goals",
                      "age_years","start_rate","minutes_per_match","goal_involvement","discipline_index",
                      "clean_sheets","saves","goals_conceded"]
-    team_cols = ["elo_rating", "fifa_ranking_pre_tournament"]
+    team_cols = ["elo_rating"] + (["fifa_ranking_pre_tournament"] if include_fifa_rank else [])
     cat_cols = ["position"]
 
     def build_xy(include_team):
@@ -313,7 +313,17 @@ def run_ml_pipeline(_df):
                 rules=rules, recall_lift=recall_lift, threshold_comp=threshold_comp, team_vs_indiv=team_vs_indiv,
                 imbalance_comp=imbalance_comp, overfit_diag=overfit_diag)
 
-_ml = run_ml_pipeline(df)
+st.sidebar.markdown("---")
+st.sidebar.markdown("#### Classification feature set")
+include_fifa_rank = st.sidebar.checkbox(
+    "Include `fifa_ranking_pre_tournament`",
+    value=True,
+    help="Uncheck to retrain every classifier (fresh GridSearchCV, same 80/20 split, same 5-fold CV) "
+         "without this column — squad strength is then represented only by `elo_rating`. Affects the "
+         "Classification Model Results and Model Improvements sections."
+)
+
+_ml = run_ml_pipeline(df, include_fifa_rank)
 model_baseline = _ml["model_baseline"]
 model_tuned = _ml["model_tuned"]
 roc_baseline = _ml["roc_baseline"]
@@ -865,8 +875,18 @@ elif section == "🔗 Association Rules":
 elif section == "🤖 Classification Model Results":
     st.title("Classification Model Results")
     st.markdown('<p class="section-note">Target: <b>is_high_value</b> — is a player in the top quartile of market value? '
-                '80/20 stratified train-test split, 6 algorithms, then GridSearchCV (5-fold CV) hyperparameter tuning.</p>',
+                '80/20 stratified train-test split, 8 algorithms, then GridSearchCV (5-fold CV) hyperparameter tuning.</p>',
                 unsafe_allow_html=True)
+
+    if include_fifa_rank:
+        st.info("**Feature set: full**, including both team-context columns — `elo_rating` and "
+                "`fifa_ranking_pre_tournament`. Toggle this off in the sidebar to see how the models "
+                "and feature importance change without the FIFA ranking column.")
+    else:
+        st.warning("**Feature set: `fifa_ranking_pre_tournament` removed.** Every model on this page was "
+                   "re-trained from scratch (fresh GridSearchCV, same 80/20 split, same 5-fold CV) on the "
+                   "remaining features — squad strength is now represented only by `elo_rating`. "
+                   "Toggle it back on in the sidebar to restore the full feature set.")
 
     view = st.radio("Model set (local to this section)", ["Baseline (80/20 split)", "Tuned (GridSearchCV, 5-fold CV)"],
                      horizontal=True, key="clf_view")
@@ -914,7 +934,17 @@ elif section == "🤖 Classification Model Results":
     st.plotly_chart(fig, width='stretch')
 
     if len(feat_imp) > 0:
-        st.markdown("#### Feature Importance — Best Overall Model (by Test ROC-AUC)")
+        best_name = model_tuned.sort_values("ROC-AUC", ascending=False).iloc[0]["Model"]
+        st.markdown(f"#### Feature Importance — Best Overall Model (by Test ROC-AUC): {best_name}")
+        st.markdown(
+            '<p class="section-note">This shows, for the single best-performing algorithm, how much each '
+            'input feature contributed to its predictions of <b>is_high_value</b>. For tree-based models '
+            '(Gradient Boosting, Random Forest, XGBoost, LightGBM) it\'s the average reduction in prediction '
+            'error each feature is responsible for across all trees; for linear models it\'s the absolute size '
+            'of the coefficient. Values are normalized to sum to 1, so a feature at 0.20 accounts for roughly '
+            '20% of the model\'s total decision-making weight. It answers "what is the model actually keying '
+            'off of?", not "what causes market value" — importance can reflect a proxy (e.g. squad strength) '
+            'rather than a direct skill signal.</p>', unsafe_allow_html=True)
         fig = px.bar(feat_imp.sort_values("importance"), x="importance", y="feature", orientation="h",
                      color="importance", color_continuous_scale=[CHALK, GOLD],
                      labels={"importance": "Importance", "feature": "Feature"})
@@ -985,7 +1015,8 @@ elif section == "🎯 Model Improvements":
     st.plotly_chart(fig, width='stretch')
 
     st.markdown("#### Team Context vs Individual Skill — Isolating the Effect")
-    st.markdown("Same best algorithm, retrained with vs. without `elo_rating` and `fifa_ranking_pre_tournament`:")
+    team_cols_desc = "`elo_rating` and `fifa_ranking_pre_tournament`" if include_fifa_rank else "`elo_rating` (FIFA ranking currently excluded via the sidebar toggle)"
+    st.markdown(f"Same best algorithm, retrained with vs. without {team_cols_desc}:")
     col1, col2 = st.columns([1.3, 1])
     with col1:
         fig = px.bar(team_vs_indiv.melt(id_vars="Feature Set",
